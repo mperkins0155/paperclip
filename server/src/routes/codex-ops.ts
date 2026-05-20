@@ -1,9 +1,12 @@
 import { access, readFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Router } from "express";
 import { assertCompanyAccess } from "./authz.js";
 
 const DEFAULT_TIMEOUT_MS = 2_500;
+const execFileAsync = promisify(execFile);
 
 interface CodexOpsServiceStatus {
   id: string;
@@ -23,6 +26,16 @@ interface CodexOpsFileStatus {
   detail: string;
   checkedAt: string;
   preview: string | null;
+}
+
+interface CodexOpsRuntimeAgent {
+  id: string;
+  name: string;
+  source: "hermes" | "openclaw" | "process" | "cron";
+  status: "active" | "running" | "scheduled" | "idle" | "warn" | "error" | "unknown";
+  detail: string;
+  updatedAt: string | null;
+  pid?: number | null;
 }
 
 function env(name: string): string | null {
@@ -114,6 +127,110 @@ async function checkFile(id: string, name: string, path: string | null): Promise
   }
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+async function readJson(path: string | null): Promise<unknown | null> {
+  if (!path) return null;
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function collectHermesRuntimeAgents(): Promise<CodexOpsRuntimeAgent[]> {
+  const agents: CodexOpsRuntimeAgent[] = [];
+  const checkedAt = new Date().toISOString();
+
+  const addRuntimeProcess = (line: string, updatedAt = checkedAt) => {
+    const match = line.trim().match(/^(\S+)\s+(\d+)\s+(.+)$/);
+    if (!match) return;
+    const [, user, pidText, cmd] = match;
+    if (cmd.includes("hermes_cli.main gateway")) return;
+    const pid = Number(pidText);
+    if (!Number.isFinite(pid) || agents.some((agent) => agent.pid === pid)) return;
+    const isHermes = cmd.includes("/.hermes/") || /claude/.test(cmd);
+    agents.push({
+      id: `process-${pid}`,
+      name: cmd.includes("openclaw-gateway") ? "OpenClaw gateway process" : cmd.includes("claude") ? "Hermes Claude runtime" : "Hermes runtime process",
+      source: isHermes ? "hermes" : "process",
+      status: "running",
+      detail: `${user} · ${cmd.slice(0, 160)}`,
+      updatedAt,
+      pid,
+    });
+  };
+
+  const gatewayStatePath = env("CODEX_OPS_HERMES_STATE_FILE") ?? "/home/madis/.hermes/gateway_state.json";
+  const gatewayState = asRecord(await readJson(gatewayStatePath));
+  if (gatewayState) {
+    const state = asString(gatewayState.gateway_state) ?? "unknown";
+    const activeAgents = asNumber(gatewayState.active_agents);
+    agents.push({
+      id: "hermes-gateway",
+      name: "Hermes gateway",
+      source: "hermes",
+      status: state === "running" ? "running" : state === "error" ? "error" : "warn",
+      detail: `Gateway ${state}${activeAgents === null ? "" : ` · ${activeAgents} active delegated agents`}`,
+      updatedAt: asString(gatewayState.updated_at),
+      pid: asNumber(gatewayState.pid),
+    });
+
+    const exportedProcesses = Array.isArray(gatewayState.runtime_processes) ? gatewayState.runtime_processes : [];
+    for (const processLine of exportedProcesses) {
+      if (typeof processLine === "string") addRuntimeProcess(processLine, asString(gatewayState.exported_at) ?? checkedAt);
+    }
+  }
+
+  const cronJobsPath = env("CODEX_OPS_HERMES_CRON_FILE") ?? "/home/madis/.hermes/cron/jobs.json";
+  const cronState = asRecord(await readJson(cronJobsPath));
+  const jobs = Array.isArray(cronState?.jobs) ? cronState.jobs : [];
+  for (const rawJob of jobs) {
+    const job = asRecord(rawJob);
+    if (!job) continue;
+    const id = asString(job.id) ?? `hermes-cron-${agents.length}`;
+    const enabled = job.enabled !== false;
+    const lastStatus = asString(job.last_status);
+    const state = asString(job.state) ?? (enabled ? "scheduled" : "idle");
+    agents.push({
+      id: `hermes-cron-${id}`,
+      name: asString(job.name) ?? "Hermes scheduled agent",
+      source: "cron",
+      status: enabled ? (lastStatus === "error" ? "error" : "scheduled") : "idle",
+      detail: `${state}${lastStatus ? ` · last ${lastStatus}` : ""}${asString(job.next_run_at) ? ` · next ${asString(job.next_run_at)}` : ""}`,
+      updatedAt: asString(job.last_run_at) ?? asString(cronState?.updated_at),
+    });
+  }
+
+  if (process.platform !== "win32") {
+    try {
+      const { stdout } = await execFileAsync("ps", ["-eo", "user=,pid=,cmd=", "--cols", "220"], { timeout: 1_500, maxBuffer: 256_000 });
+      const interesting = stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /hermes|claude|openclaw-gateway/i.test(line))
+        .filter((line) => !/grep|ps -eo/i.test(line))
+        .slice(0, 12);
+
+      for (const line of interesting) addRuntimeProcess(line);
+    } catch {
+      // Process discovery is best-effort; the dashboard should still render static status.
+    }
+  }
+
+  return agents;
+}
+
 export function codexOpsRoutes() {
   const router = Router();
 
@@ -121,11 +238,12 @@ export function codexOpsRoutes() {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
 
-    const [services, backup, deployment, openVikingLog] = await Promise.all([
+    const [services, backup, deployment, openVikingLog, runtimeAgents] = await Promise.all([
       Promise.all(parseServiceConfig().map((service) => checkUrl(service.id, service.name, service.url))),
       checkFile("backup", "Backup status", env("CODEX_OPS_BACKUP_STATUS_FILE")),
       checkFile("deployment", "Deployment status", env("CODEX_OPS_DEPLOYMENT_STATUS_FILE")),
       checkFile("openviking", "OpenViking log/status", env("CODEX_OPS_OPENVIKING_STATUS_FILE")),
+      collectHermesRuntimeAgents(),
     ]);
 
     const configuredServices = services.filter((service) => service.url).length;
@@ -137,6 +255,7 @@ export function codexOpsRoutes() {
       checkedAt: new Date().toISOString(),
       mode: "read_only",
       services,
+      runtimeAgents,
       files: [backup, deployment, openVikingLog],
       openViking: {
         namespace: env("CODEX_OPS_OPENVIKING_NAMESPACE"),
@@ -146,6 +265,8 @@ export function codexOpsRoutes() {
         configuredServices,
         okServices,
         errorServices,
+        runtimeAgents: runtimeAgents.length,
+        runningRuntimeAgents: runtimeAgents.filter((agent) => ["active", "running", "scheduled"].includes(agent.status)).length,
         configuredFiles: [backup, deployment, openVikingLog].filter((file) => file.path).length,
       },
       env: {

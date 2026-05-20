@@ -20,11 +20,22 @@ export interface CodexOpsFileStatus {
   preview: string | null;
 }
 
+export interface CodexOpsRuntimeAgent {
+  id: string;
+  name: string;
+  source: "hermes" | "openclaw" | "process" | "cron";
+  status: "active" | "running" | "scheduled" | "idle" | "warn" | "error" | "unknown";
+  detail: string;
+  updatedAt: string | null;
+  pid?: number | null;
+}
+
 export interface CodexOpsStatus {
   companyId: string;
   checkedAt: string;
   mode: "read_only";
   services: CodexOpsServiceStatus[];
+  runtimeAgents: CodexOpsRuntimeAgent[];
   files: CodexOpsFileStatus[];
   openViking: {
     namespace: string | null;
@@ -34,6 +45,8 @@ export interface CodexOpsStatus {
     configuredServices: number;
     okServices: number;
     errorServices: number;
+    runtimeAgents: number;
+    runningRuntimeAgents: number;
     configuredFiles: number;
   };
   env: {
