@@ -666,6 +666,7 @@ export const queryKeys = {
     ["work-timeline", companyId, lens ?? "all"] as const,
   userProfile: (companyId: string, userSlug: string) =>
     ["user-profile", companyId, userSlug] as const,
+  codexOps: (companyId: string) => ["codex-ops", companyId] as const,
   sidebarBadges: (companyId: string) => ["sidebar-badges", companyId] as const,
   inboxDismissals: (companyId: string) =>
     ["inbox-dismissals", companyId] as const,

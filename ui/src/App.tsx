@@ -25,6 +25,7 @@ import { useCombinedInboxTasksEnabled } from "./hooks/useCombinedInboxTasksEnabl
 import { ChatConnectorsExperimentalGate } from "./components/ChatConnectorsExperimentalGate";
 import { useChatConnectorsEnabled } from "./hooks/useChatConnectorsEnabled";
 import { canEnterAppsConnect } from "./pages/apps/app-connect-policy";
+import { CodexHQ } from "./pages/CodexHQ";
 import { NotFoundPage } from "./pages/NotFound";
 import { useCompany } from "./context/CompanyContext";
 import { useDialogActions, useDialogState } from "./context/DialogContext";
@@ -151,6 +152,7 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
         path="timeline"
         element={streamlinedUiEnabled ? <AuditCompatibilityRedirect to="/activity/timeline" /> : <Timeline />}
       />
+      <Route path="codex-hq" element={<CodexHQ />} />
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={<Companies />} />
       <Route path="company/settings" element={<CompanySettings />} />
