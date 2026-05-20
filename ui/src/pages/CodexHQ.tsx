@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { activityApi } from "../api/activity";
 import { agentsApi } from "../api/agents";
-import { codexOpsApi, type CodexOpsServiceStatus } from "../api/codexOps";
+import { codexOpsApi, type CodexOpsRuntimeAgent, type CodexOpsServiceStatus } from "../api/codexOps";
 import { dashboardApi } from "../api/dashboard";
 import { heartbeatsApi } from "../api/heartbeats";
 import { issuesApi } from "../api/issues";
@@ -45,6 +45,10 @@ function isDeploymentIssue(issue: Issue) {
 
 function agentSubtitle(agent: Agent) {
   return agent.title ?? agent.capabilities ?? agent.adapterType;
+}
+
+function runtimeAgentSubtitle(agent: CodexOpsRuntimeAgent) {
+  return `${agent.source}${agent.pid ? ` · pid ${agent.pid}` : ""} · ${agent.detail}`;
 }
 
 function opsStatusTone(status: CodexOpsServiceStatus["status"]) {
@@ -114,9 +118,12 @@ export function CodexHQ() {
   const openDeploymentIssues = deploymentIssues.filter((issue) => !["done", "cancelled"].includes(issue.status));
   const blockedIssues = (issues ?? []).filter((issue) => issue.status === "blocked");
   const recentActivity = (activity ?? []).slice(0, 8);
+  const runtimeAgents = opsStatus?.runtimeAgents ?? [];
   const visibleAgents = (agents ?? []).slice(0, 12);
-  const activeAgents = (agents ?? []).filter((agent) => ["active", "running"].includes(agent.status)).length;
-  const offlineAgents = (agents ?? []).filter((agent) => ["error", "terminated"].includes(agent.status)).length;
+  const visibleRuntimeAgents = runtimeAgents.slice(0, 12);
+  const activeAgents = (agents ?? []).filter((agent) => ["active", "running"].includes(agent.status)).length + (opsStatus?.summary.runningRuntimeAgents ?? 0);
+  const totalAgents = (agents?.length ?? 0) + runtimeAgents.length;
+  const offlineAgents = (agents ?? []).filter((agent) => ["error", "terminated"].includes(agent.status)).length + runtimeAgents.filter((agent) => ["error", "warn"].includes(agent.status)).length;
 
   if (!selectedCompanyId) {
     return (
@@ -150,7 +157,7 @@ export function CodexHQ() {
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-lg border border-border bg-card">
-          <MetricCard icon={Bot} value={activeAgents} label="Active agents" description={`${agents?.length ?? 0} registered in this company`} to="/agents" />
+          <MetricCard icon={Bot} value={activeAgents} label="Active agents" description={`${totalAgents} registered/runtime agents`} to="/agents" />
         </div>
         <div className="rounded-lg border border-border bg-card">
           <MetricCard icon={Activity} value={liveRuns?.length ?? 0} label="Live runs" description="Current Paperclip heartbeat/task runs" to="/activity" />
@@ -167,10 +174,11 @@ export function CodexHQ() {
         <section className="rounded-lg border border-border bg-card">
           <div className="border-b border-border p-4">
             <h2 className="flex items-center gap-2 text-base font-semibold"><Network className="h-4 w-4" /> Agent fleet</h2>
-            <p className="mt-1 text-xs text-muted-foreground">Pulled from Paperclip company agents. VPS runtime verification gets wired next.</p>
+            <p className="mt-1 text-xs text-muted-foreground">Paperclip company agents plus live Hermes runtime/process/cron discovery from the VPS.</p>
           </div>
           <div className="divide-y divide-border">
-            {visibleAgents.length > 0 ? visibleAgents.map((agent) => (
+            {visibleAgents.length + visibleRuntimeAgents.length > 0 ? (<>
+            {visibleAgents.map((agent) => (
               <Link key={agent.id} to={`/agents/${agent.urlKey || agent.id}`} className="flex items-center justify-between gap-3 p-4 no-underline hover:bg-accent/40">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
@@ -181,7 +189,21 @@ export function CodexHQ() {
                 </div>
                 <span className={cn("shrink-0 text-xs font-medium capitalize", statusTone(agent.status))}>{agent.status}</span>
               </Link>
-            )) : (
+            ))}
+            {visibleRuntimeAgents.map((agent) => (
+              <div key={agent.id} className="flex items-center justify-between gap-3 p-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <StatusIcon status={agent.status} />
+                    <span className="truncate text-sm font-medium text-foreground">{agent.name}</span>
+                    <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Hermes</span>
+                  </div>
+                  <p className="mt-1 truncate text-xs text-muted-foreground">{runtimeAgentSubtitle(agent)}</p>
+                </div>
+                <span className={cn("shrink-0 text-xs font-medium capitalize", statusTone(agent.status))}>{agent.status}</span>
+              </div>
+            ))}
+            </>) : (
               <div className="p-6 text-sm text-muted-foreground">No agents registered yet.</div>
             )}
           </div>
@@ -193,7 +215,8 @@ export function CodexHQ() {
           </div>
           <div className="space-y-3 p-4 text-sm">
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Paperclip company</span><span className="font-medium text-emerald-500">selected</span></div>
-            <div className="flex items-center justify-between"><span className="text-muted-foreground">Registered agents</span><span className="font-medium">{agents?.length ?? 0}</span></div>
+            <div className="flex items-center justify-between"><span className="text-muted-foreground">Paperclip agents</span><span className="font-medium">{agents?.length ?? 0}</span></div>
+            <div className="flex items-center justify-between"><span className="text-muted-foreground">Hermes runtime agents</span><span className="font-medium">{runtimeAgents.length}</span></div>
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Projects</span><span className="font-medium">{projects?.length ?? 0}</span></div>
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Open tasks</span><span className="font-medium">{dashboard?.tasks.open ?? (dashboardLoading ? "…" : 0)}</span></div>
             <div className="flex items-center justify-between"><span className="text-muted-foreground">In progress</span><span className="font-medium">{dashboard?.tasks.inProgress ?? (dashboardLoading ? "…" : 0)}</span></div>
